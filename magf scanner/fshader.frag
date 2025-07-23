@@ -20,14 +20,14 @@ void main() {
   // Diffuse lighting
   vec3 norm = normalize(fragmentNormal);
   vec3 lightDir = normalize(lightPos - fragmentPosition);
-  float diff = max(dot(norm, lightDir), 0.0);
+  float diff = abs(dot(norm, lightDir));
   vec3 diffuse = diff * vec3(1.0);
 
   // Specular lighting
   float specularStrength = 0.5;
   vec3 viewDir = normalize(viewPos - fragmentPosition);
   vec3 reflectDir = reflect(-lightDir, norm);
-  float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
+  float spec = pow(abs(dot(viewDir, reflectDir)), 32);
   vec3 specular = specularStrength * spec * vec3(1.0);
 
   vec3 result = (ambient + diffuse + specular) * fragmentColor;

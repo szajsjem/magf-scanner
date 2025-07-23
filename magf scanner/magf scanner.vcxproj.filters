@@ -50,16 +50,18 @@
     <ClInclude Include="MapManager.h">
       <Filter>Pliki źródłowe</Filter>
     </ClInclude>
-    <ClInclude Include="vshader.vert">
-      <Filter>txt</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="fshader.frag">
       <Filter>txt</Filter>
     </FxCompile>
-    <FxCompile Include="gshader.geom">
+    <FxCompile Include="vshader.vert">
       <Filter>txt</Filter>
     </FxCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="marching_cubes.comp">
+      <Filter>txt</Filter>
+    </None>
   </ItemGroup>
 </Project>

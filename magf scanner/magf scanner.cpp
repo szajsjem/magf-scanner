@@ -21,116 +21,130 @@ struct WaterDrop {
 	float sediment = 0.0f; // Start with no sediment
 };
 
-void erosion_thread(MapManager& m) {
-	// --- Simulation Parameters (tweak these to change the erosion style) ---
-	const int MAX_LIFESPAN = 80;   // Max steps for a drop before it dies
-	const float GRAVITY = 9.81f;   // Influences acceleration
-	const float INERTIA = 0.1f;    // How much velocity is preserved
-	const float MIN_SLOPE = 0.01f; // Minimum slope to be considered downhill
+void erosion_thread_lambda(MapManager& m) {
+	// --- Simulation Parameters ---
+	const int MAX_LIFESPAN = 100;
+	const float GRAVITY = 9.81f;
 
-	// Erosion and Deposition
-	const float EROSION_RATE = 0.1f;      // How easily sediment is picked up
-	const float DEPOSITION_RATE = 0.2f;   // How easily sediment is dropped
-	const float CAPACITY_FACTOR = 8.0f;   // How much sediment water can hold
-	const float EVAPORATION_RATE = 0.05f; // How much water is lost each step
+	const float EROSION_RATE = 0.05f;
+	const float DEPOSITION_RATE = 0.1f;
+	const float CAPACITY_FACTOR = 6.0f;
+	const float EVAPORATION_RATE = 0.02f;
+	const float MIN_EROSION_DIFF = 0.01f; // Min height diff to erode
 
-	// Main loop to continuously create new water drops
 	while (true) {
 		// 1. INITIALIZE THE DROP
-		// Start at a random position on the terrain surface
 		Pos start_pos(
 			rnd.rndi() % 1000 - 500ll,
 			0,
 			rnd.rndi() % 1000 - 500ll
 		);
-		start_pos.y = m.noise.getheight(start_pos.x, start_pos.z);
+		start_pos.y = m.noise.getheight(start_pos.x, start_pos.z) + 20;
 
-		WaterDrop drop{ start_pos };
+		// Find the first air block above the terrain to place the drop
+		// m.blockat is called for reading, which is fine here.
+		while (m.blockat(start_pos) > 0 && start_pos.y < 255) {
+			start_pos.y++;
+		}
+		// If start_pos ends up in a solid block (e.g., maxHeight reached),
+		// it's safer to break or choose a new position.
+		if (m.blockat(start_pos) > 0) {
+		    // Optionally handle error or re-attempt
+		    continue;
+		}
 
-		// Simulate the drop's life for a fixed number of steps
+
+		WaterDrop drop{start_pos};
+
 		for (int i = 0; i < MAX_LIFESPAN; ++i) {
-			float& current_block_ref = m.blockat(drop.pos);
-			if (current_block_ref < 0) break; // Fell out of the world
+			Pos ground_pos = drop.pos + Pos{0, -1, 0};
+			float ground_block_value = m.blockat(ground_pos); // Read value
 
-			float current_height = current_block_ref + drop.pos.y;
+			// A. GRAVITY: If the block below is air, just fall.
+			if (ground_block_value == 0) {
+				drop.pos.y -= 1;
+				drop.velocity += GRAVITY * 0.1f; // Accelerate while falling
+				continue; // Skip to next iteration
+			}
 
-			// 2. FIND LOWEST NEIGHBOR (GRADIENT)
-			Pos neighbor_offsets[] = {
-				{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}
-			};
+			// B. SURFACE FLOW: If the block below is solid, flow over it.
+			float current_surface_height = ground_pos.y + ground_block_value;
 			Pos next_pos = drop.pos;
-			float min_neighbor_height = current_height;
+			float min_neighbor_height = current_surface_height;
 
-			for (const auto& offset : neighbor_offsets) {
-				Pos neighbor_pos = drop.pos + offset;
-				float& neighbor_block_ref = m.blockat(neighbor_pos);
+			// Find the lowest valid neighbor on the surface
+			for (int dx = -1; dx <= 1; ++dx) {
+				for (int dz = -1; dz <= 1; ++dz) {
+					if (dx == 0 && dz == 0) continue;
 
-				// Ignore "air" blocks
-				if (neighbor_block_ref < 0) continue;
+					Pos neighbor_air_pos = drop.pos + Pos{dx, 0, dz};
+					// Don't flow into solid walls (m.blockat is read-only here)
+					if (m.blockat(neighbor_air_pos) > 0) continue;
 
-				float neighbor_height = neighbor_block_ref + neighbor_pos.y;
-				if (neighbor_height < min_neighbor_height) {
-					min_neighbor_height = neighbor_height;
-					next_pos = neighbor_pos;
+					Pos neighbor_ground_pos = neighbor_air_pos + Pos{0, -1, 0};
+					float neighbor_surface_height =
+						neighbor_ground_pos.y + m.blockat(neighbor_ground_pos); // Read-only
+
+					if (neighbor_surface_height < min_neighbor_height) {
+						min_neighbor_height = neighbor_surface_height;
+						next_pos = neighbor_air_pos;
+					}
 				}
 			}
 
-			// 3. EROSION & DEPOSITION
-			float height_delta = current_height - min_neighbor_height;
+			float height_delta = current_surface_height - min_neighbor_height;
 
-			// If there's a downhill slope, erode or deposit
-			if (height_delta > MIN_SLOPE) {
-				// Calculate sediment capacity based on velocity, water, and slope
+			// C. ERODE OR DEPOSIT on the ground block BENEATH the drop
+			// If height_delta <= 0, we are in a pit or on flat ground.
+			if (height_delta <= 0) {
+				// Deposit sediment aggressively if stuck or in a pit
+				float amount_to_deposit = drop.sediment * DEPOSITION_RATE;
+				float new_ground_value = ground_block_value + amount_to_deposit;
+				m.setblock(ground_pos, std::min(1.0f, new_ground_value)); // Write back
+				drop.sediment -= amount_to_deposit;
+				break; // Stop drop, it's stuck
+			} else { // Moving downhill, so erode or deposit based on capacity
 				float capacity =
 					height_delta * drop.velocity * drop.water * CAPACITY_FACTOR;
 
-				// If carrying more sediment than capacity, DEPOSIT
 				if (drop.sediment > capacity) {
-					float amount_to_deposit =
-						(drop.sediment - capacity) * DEPOSITION_RATE;
-					current_block_ref += amount_to_deposit;
+					// Deposit sediment if over capacity
+					float amount_to_deposit = (drop.sediment - capacity) * DEPOSITION_RATE;
+					float new_ground_value = ground_block_value + amount_to_deposit;
+					m.setblock(ground_pos, std::min(1.0f, new_ground_value)); // Write back
 					drop.sediment -= amount_to_deposit;
-				}
-				// Otherwise, ERODE
-				else {
-					// Erode an amount proportional to the remaining capacity
-					// but don't erode more than the height difference itself
+				} else if (height_delta > MIN_EROSION_DIFF) {
+					// Erode if under capacity and slope is steep enough
 					float amount_to_erode = std::min(
 						(capacity - drop.sediment) * EROSION_RATE,
-						height_delta
+						height_delta / 2.0f // Don't erode more than half the slope
 					);
-					current_block_ref -= amount_to_erode;
+					// Clamp erosion so block doesn't go below 0
+					amount_to_erode = std::min(amount_to_erode, ground_block_value);
+					float new_ground_value = ground_block_value - amount_to_erode;
+					m.setblock(ground_pos, std::max(0.0f, new_ground_value)); // Write back
 					drop.sediment += amount_to_erode;
 				}
 			}
-			// If on flat ground or in a pit, deposit sediment
-			else {
-				float amount_to_deposit = drop.sediment * DEPOSITION_RATE;
-				current_block_ref += amount_to_deposit;
-				drop.sediment -= amount_to_deposit;
-			}
 
-			// 4. UPDATE DROP STATE
-			// Update velocity based on gravity and the height delta
+			// D. UPDATE DROP STATE AND MOVE
 			drop.velocity = std::sqrt(
-				drop.velocity * drop.velocity + height_delta * GRAVITY
+				std::max(0.0f, drop.velocity * drop.velocity + height_delta * GRAVITY)
 			);
-			// Evaporate some water
 			drop.water *= (1.0f - EVAPORATION_RATE);
+			drop.pos = next_pos; // Move the drop to the new air block position
 
-			// 5. MOVE THE DROP
-			drop.pos = next_pos;
-
-			// End simulation if drop has evaporated or stopped moving
 			if (drop.water < 0.01f || drop.velocity < 0.01f) {
 				break;
 			}
 		}
 
-		// After the loop, deposit any remaining sediment at the final position
-		float& final_block_ref = m.blockat(drop.pos);
-		if (final_block_ref >= 0) {
-			final_block_ref += drop.sediment;
+		// Deposit any leftover sediment at the final ground position
+		Pos final_ground_pos = drop.pos + Pos{0, -1, 0};
+		float final_ground_value = m.blockat(final_ground_pos); // Read final value
+		if (final_ground_value > 0) { // Check if it's solid (or partially solid) to deposit on
+			float new_final_ground_value = final_ground_value + drop.sediment;
+			m.setblock(final_ground_pos, std::min(1.0f, new_final_ground_value)); // Write final value
 		}
 	}
 }
@@ -139,8 +153,7 @@ int main() {
 
 	std::vector<glm::vec3> punkty;
 	std::vector<glm::vec3> kolor;
-	std::vector<glm::vec4> cub;
-	std::vector<glm::vec4> cub2;
+	std::vector<glm::vec3> nor;
 	MapManager m(69420);
 
 
@@ -148,11 +161,12 @@ int main() {
 	bool newpoints = 0;
 
 
-	oknogl o; shader s("vshader.vert", "fshader.frag" , "gshader.geom");//	);//
+	oknogl o; 
+	shader s("vshader.vert", "fshader.frag");//, "gshader.geom");//	);//
 	o.playerpos = { 0,m.noise.getheight(0,0) + 2,0 };
 	buffer glpoints;
 	buffer glcolors;
-	buffer glC,glC2;
+	buffer glnorm;
 	Pos watp = { 0,(long long)m.noise.getheight(0,0) + 5,0 };
 
 	std::thread tw([&]() {
@@ -162,36 +176,45 @@ int main() {
 			printf("plpos x:%lf y:%lf z:%lf\n", o.playerpos.x, o.playerpos.y, o.playerpos.z);
 			printf("watpos x:%lld y:%lld z:%lld\n", watp.x, watp.y, watp.z);
 			Pos plpos = { (long long)o.playerpos.x,(long long)o.playerpos.y ,(long long)o.playerpos.z };
-			m.uptate(plpos, 1);
+			m.uptate(plpos, 10);
+			printf("chunks:%lld\n", m.renderchunks.size());
 			std::vector<glm::vec3> pointss;
+			std::vector<glm::vec3> norm;
 			std::vector<glm::vec3> colrss;
-			std::vector<glm::vec4> cv;
-			std::vector<glm::vec4> cv2;
-			for (auto chh : m.renderchunks) {
-				for (int x = 0; x < chunkx; x++) {
-					for (int y = 0; y < chunky; y++) {
-						for (int z = 0; z < chunkz; z++) {
-							if (chh->ch->render[x][y][z]) {
-								float zxxx = chh->ch->v[x][y][z];
-								pointss.push_back({ (chh->position.x * chunkx) + (float)x,(chh->position.y * chunky) + (float)y + zxxx, (chh->position.z * chunkz) + (float)z });
-								colrss.push_back({ zxxx,zxxx,zxxx });
-								cv.push_back(glm::vec4(
-									chh->ch->v[x][y][z],     // Corner 0 - cv.x
-									chh->ch->v[x + 1][y][z], // Corner 1 - cv.y
-									chh->ch->v[x + 1][y][z + 1], // Corner 2 - cv.z
-									chh->ch->v[x][y][z + 1]  // Corner 3 - cv.w
-								));
-								cv2.push_back(glm::vec4(
-									chh->ch->v[x][y + 1][z],   // Corner 4 - cv2.x
-									chh->ch->v[x + 1][y + 1][z], // Corner 5 - cv2.y
-									chh->ch->v[x + 1][y + 1][z + 1], // Corner 6 - cv2.z
-									chh->ch->v[x][y + 1][z + 1] // Corner 7 - cv2.w
-								));
-							}
-						}
-					}
+			for(auto& chh : m.renderchunks) {
+				if (chh->ch->state == chunkempty)continue;
+				std::lock_guard<std::mutex> lock(chh->ch->vtxlock);
+				for (auto& vert : chh->ch->vertices) {
+					pointss.push_back({ vert.position.x + chh->position.x * chunkx, vert.position.y + chh->position.y * chunky, vert.position.z + chh->position.z * chunkz });
+					colrss.push_back({ 1, 1, 1 });
+					norm.push_back({ vert.normal.x, vert.normal.y, vert.normal.z });
 				}
 			}
+			//for (auto chh : m.renderchunks) {
+			//	for (int x = 0; x < chunkx; x++) {
+			//		for (int y = 0; y < chunky; y++) {
+			//			for (int z = 0; z < chunkz; z++) {
+			//				if (chh->ch->render[x][y][z]) {
+			//					float zxxx = chh->ch->v[x][y][z];
+			//					pointss.push_back({ (chh->position.x * chunkx) + (float)x,(chh->position.y * chunky) + (float)y + zxxx, (chh->position.z * chunkz) + (float)z });
+			//					colrss.push_back({ zxxx,zxxx,zxxx });
+			//					cv.push_back(glm::vec4(
+			//						chh->ch->v[x][y][z],     // Corner 0 - cv.x
+			//						chh->ch->v[x + 1][y][z], // Corner 1 - cv.y
+			//						chh->ch->v[x + 1][y][z + 1], // Corner 2 - cv.z
+			//						chh->ch->v[x][y][z + 1]  // Corner 3 - cv.w
+			//					));
+			//					cv2.push_back(glm::vec4(
+			//						chh->ch->v[x][y + 1][z],   // Corner 4 - cv2.x
+			//						chh->ch->v[x + 1][y + 1][z], // Corner 5 - cv2.y
+			//						chh->ch->v[x + 1][y + 1][z + 1], // Corner 6 - cv2.z
+			//						chh->ch->v[x][y + 1][z + 1] // Corner 7 - cv2.w
+			//					));
+			//				}
+			//			}
+			//		}
+			//	}
+			//}
 			/*for (int x = -100; x < 100; x++) {
 				for (int z = -100; z < 100; z++) {
 					pointss.push_back({ (float)x+plpos.x,(float)m.noise.getheight(x+ plpos.x,z+ plpos.z),(float)z+ plpos.z });
@@ -201,31 +224,39 @@ int main() {
 
 			pointss.push_back({ watp.x,watp.y + 0.1,watp.z });
 			colrss.push_back({ 1.0f,0.0f,1.0f });
-			cv.push_back(glm::vec4(1,0,0,0));
-			cv2.push_back(glm::vec4(0,0,0,0));
+			norm.push_back({ 0.0f,1.0f,0.0f });
+			pointss.push_back({ watp.x,watp.y - 0.1,watp.z });
+			colrss.push_back({ 1.0f,0.0f,1.0f });
+			norm.push_back({ 0.0f,1.0f,0.0f });
+			pointss.push_back({ watp.x+0.1,watp.y,watp.z+0.1 });
+			colrss.push_back({ 1.0f,0.0f,1.0f });
+			norm.push_back({ 0.0f,1.0f,0.0f });
 
 			if (!newpoints) {
 				punkty.swap(pointss);
 				kolor.swap(colrss);
-				cub.swap(cv);
-				cub2.swap(cv2);
+				nor.swap(norm);
 				newpoints = 1;
 			}
 		}
 		});
-	std::thread watrdrop(erosion_thread, std::ref(m));
+	std::thread watrdrop(erosion_thread_lambda, std::ref(m));
 	std::thread watrdropold([&]() {
 		return;
 		while (1) {
 			int kk = 80;
+			float b = m.blockat(watp);
+			auto watpp = watp;
 			while (1) {
 				kk--;
 				if (kk == 0)break;
 				//Sleep(1);
-				float& b = m.blockat(watp);
+				m.setblock(watpp, b); 
+				watpp = watp;
+				b = m.blockat(watp);
 				//printf("\n%f ", b);
 				if (b < 0)continue;
-				if (b < 0.00001) {
+				if (b <= 0.0) {
 					//printf("\n");
 					watp.y -= 1;
 					continue;
@@ -313,17 +344,15 @@ int main() {
 			torender = punkty.size();
 			glpoints.loadbuff(punkty.data(), punkty.size() * sizeof(glm::vec3));
 			glcolors.loadbuff(kolor.data(), kolor.size() * sizeof(glm::vec3));
-			glC.loadbuff(cub.data(), cub.size() * sizeof(glm::vec4));
-			glC2.loadbuff(cub2.data(), cub2.size() * sizeof(glm::vec4));
+			glnorm.loadbuff(nor.data(), nor.size() * sizeof(glm::vec3));
 			newpoints = 0;
 		}
 
 		o.startframe(s);
 		o.setarg(0, glpoints, 3);
 		o.setarg(1, glcolors, 3);
-		o.setarg(2, glC, 4);
-		o.setarg(3, glC2, 4);
-		o.draw(torender, GL_POINTS);
+		o.setarg(2, glnorm, 3);
+		o.draw(torender, GL_TRIANGLES);
 		o.wyswietl();
 	}
 	exit(0);
