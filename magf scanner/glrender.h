@@ -371,6 +371,8 @@ public:
 		glBindBuffer(GL_UNIFORM_BUFFER, uboTriangulation);
 		glBufferData(GL_UNIFORM_BUFFER, sizeof(triangulation), triangulation, GL_STATIC_DRAW);
 		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+		glfwSetScrollCallback(window, [](GLFWwindow* window, double xoffset, double yoffset) {return ((oknogl*)(glfwGetWindowUserPointer(window)))->scroll_callback(window, xoffset, yoffset); });
 	}
 	void keycb(GLFWwindow* window, int key, int scancode, int action, int mods) {
 		if (key == GLFW_KEY_W) {
@@ -415,6 +417,26 @@ public:
 		viewkier.r -= viewkier.r * dy / t;
 		viewkier.b -= viewkier.b * dy / t;
 		xold = xpos;
+	}
+	float* scrool = nullptr;
+	float* scroolshift = nullptr;
+	void scroll_callback(GLFWwindow* window, double xoffset, double yoffset){
+		if (przyspmult > 10) {
+			if(scroolshift) {
+				*scroolshift *= 1 + yoffset / 100;
+			}
+			else {
+				printf("scroll shift %f\n", yoffset);
+			}
+		}
+		else {
+		if (scrool) {
+			*scrool *= 1 + yoffset / 100;
+		}
+		else {
+			printf("scroll %f\n", yoffset);
+		}
+		}
 	}
 	void startframe(shader s) {
 		glUseProgram(s.ProgramID);

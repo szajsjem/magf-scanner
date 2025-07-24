@@ -620,6 +620,13 @@ struct Pos {
 		w.z += z;
 		return w;
 	}
+	void normalize(float r=1) {
+		double d = sqrt(x * x + y * y + z * z) / r;
+		if (d == 0) return;
+		x /= d;
+		y /= d;
+		z /= d;
+	}
 	constexpr bool operator()(const Pos& lhs, const Pos& rhs) const
 	{
 		return lhs == rhs;
@@ -629,6 +636,12 @@ struct Pos {
 		long long dy = o.y - y;
 		long long dz = o.z - z;
 		return sqrt(dx * dx + dy * dy + dz * dz);
+	}
+	double odlkw(const Pos o) const {
+		long long dx = o.x - x;
+		long long dy = o.y - y;
+		long long dz = o.z - z;
+		return (dx * dx + dy * dy + dz * dz);
 	}
 };
 
@@ -651,11 +664,106 @@ namespace std {
 class MapgenNoise{
 	packednoise p;
 	packednoise h;
+	std::vector<Pos> receiverPos;
+	std::vector<Pos> senderPos;
+	std::vector<Pos> reflectorsPos;
+	std::vector<std::vector<float>> signalsRxS;
+	std::vector<std::vector<float>> signalsRxR;
+	int receiverCount = 6;
+	int senderCount = 12;
+	int reflectorCount = 10;
+	int sampleRate = 192000; // Hz
+	int timeCount = sampleRate * 3;
+	float speedOfLight = 299792.0f;// 299792458.0f; // m/s
+	float peaksmooth = 0.7f;
 public:
+	Pos randomPointOnSphere(float radius) {
+		float theta = ((float)rand() / RAND_MAX) * 2 * 3.1415;
+		float phi = acos(1 - 2 * ((float)rand() / RAND_MAX));
+		Pos p;
+		p.x = radius * sin(phi) * cos(theta);
+		p.y = radius * sin(phi) * sin(theta);
+		p.z = radius * cos(phi);
+		return p;
+	}
 	MapgenNoise(long long seed):p(2, 0.5, 8, 0.2, seed),h(0.15,4,8,0.5,seed+1){
-
+		receiverPos.resize(receiverCount);
+		senderPos.resize(senderCount);
+		reflectorsPos.resize(reflectorCount);
+		signalsRxS.resize(receiverCount * senderCount);
+		signalsRxR.resize(receiverCount * receiverCount);
+		for (int i = 0; i < receiverCount; i++) {
+			/*receiverPos[i].x = rand() - RAND_MAX / 2;
+			receiverPos[i].y = rand() - RAND_MAX / 2;
+			receiverPos[i].z = rand() - RAND_MAX / 2;
+			receiverPos[i].normalize(100);*/
+			receiverPos[i] = randomPointOnSphere(100);
+		}
+		for (int i = 0; i < senderCount; i++) {
+			/*senderPos[i].x = rand() - RAND_MAX / 2;
+			senderPos[i].y = rand() - RAND_MAX / 2;
+			senderPos[i].z = rand() - RAND_MAX / 2;
+			senderPos[i].normalize(100);*/
+			senderPos[i] = randomPointOnSphere(100);
+		}
+		for (int i = 0; i < reflectorCount; i++) {
+			/*reflectorsPos[i].x = rand() - RAND_MAX / 2;
+			reflectorsPos[i].y = rand() - RAND_MAX / 2;
+			reflectorsPos[i].z = rand() - RAND_MAX / 2;
+			reflectorsPos[i].normalize(50);*/
+			reflectorsPos[i] = randomPointOnSphere(500);
+		}
+		for (int i = 0; i < receiverCount * senderCount; i++) {
+			signalsRxS[i].resize(timeCount);
+			for (int j = 0; j < timeCount; j++) {
+				signalsRxS[i][j] = 0.001*rand()/(float)RAND_MAX;
+			}
+		}
+		for (int i = 0; i < receiverCount * receiverCount; i++) {
+			signalsRxR[i].resize(timeCount);
+			for (int j = 0; j < timeCount; j++) {
+				signalsRxR[i][j] = 0.001 * rand() / (float)RAND_MAX;
+			}
+		}
+		//simulate magnetic field reflection correlation peaks
+		for (int i = 0; i < receiverCount; i++) {
+			for (int j = 0; j < senderCount; j++) {
+				int signalIndex = i * senderCount + j;
+				for( int l=0;l<reflectorCount;l++) {
+					float pathLength = receiverPos[i].odl(reflectorsPos[l]) + reflectorsPos[l].odl(senderPos[j]);
+					for (int k = 0; k < timeCount; k++) {
+						float time = k / (float)sampleRate;
+						float distance = pathLength - speedOfLight * time;
+						distance *= distance;
+						if (distance < 0 || distance >= signalsRxS[signalIndex].size()) {
+							continue; // skip out of bounds
+						}
+						signalsRxS[signalIndex][k] += exp(-distance * peaksmooth);
+					}
+				}
+			}
+		}
+		//simulate magnetic field emission correlation peaks
+		for (int i = 0; i < receiverCount; i++) {
+			for (int j = 0; j < receiverCount; j++) {
+				int signalIndex = i * receiverCount + j;
+				for (int l = 0; l < reflectorCount; l++) {
+					float pathLength = receiverPos[i].odl(reflectorsPos[l]) + reflectorsPos[l].odl(receiverPos[j]);
+					for (int k = 0; k < timeCount; k++) {
+						float time = k / (float)sampleRate;
+						float distance = pathLength - speedOfLight * time;
+						distance *= distance;
+						if (distance < 0 || distance >= signalsRxS[signalIndex].size()) {
+							continue; // skip out of bounds
+						}
+						signalsRxR[signalIndex][k] += exp(-distance * peaksmooth);
+					}
+				}
+			}
+		}
 	}
 	double getheight(long long x, long long z) {
+		return 0;
 		constexpr double bigterrainscale = 333.333;
 		constexpr double smallterrainscale = 30;
 		constexpr double heightmultipler = 20;
@@ -672,6 +780,7 @@ public:
 		//return hmult*100 + pow(abs(hmult),pmult) + heightmultipler * p.noise(x / smallterrainscale, z / smallterrainscale);
 	}
 	float noise(long long x, long long y, long long z, double height) {
+		return magprobablity(Pos(x, y, z));
 		constexpr double xnoisescale = 138.254;
 		constexpr double ynoisescale = 134.342;
 		constexpr double znoisescale = 136.666;
@@ -686,6 +795,87 @@ public:
 		return v;
 	}
 
+	float interpolate(float prev, float next, float t) {
+		return prev * (1.0f - t) + next * t;
+	}
+	float interpolate(float y0, float y1, float y2, float t) {
+		// Fit parabola through y0, y1, y2 and evaluate at t (0 <= t < 1)
+		float a = 0.5f * (y0 - 2.0f * y1 + y2);
+		float b = 0.5f * (y2 - y0);
+		float c = y1;
+		return a * t * t + b * t + c;
+	}
+	float interpolate(float y0, float y1, float y2, float y3, float t) {
+		float a0 = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
+		float a1 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+		float a2 = -0.5f * y0 + 0.5f * y2;
+		float a3 = y1;
+		return ((a0 * t + a1) * t + a2) * t + a3;
+	}
+	float magprobablity(Pos p) {
+		//sum correlation peaks of all receivers and senders at position p
+		float sum = 0;
+		for (int i = 0; i < receiverPos.size(); i++) {
+			for (int j = 0; j < senderPos.size(); j++) {
+				float distance = p.odl(receiverPos[i]) + p.odl(senderPos[j]);
+				float distFloat = distance * sampleRate / speedOfLight;
+
+				int dist = static_cast<int>(distFloat);
+				float t = distFloat - dist; // fractional part
+
+				auto& signal = signalsRxS[i * senderPos.size() + j];
+
+				// Ensure dist and dist+1 are within bounds
+				if (dist < 1 || dist + 2 >= signal.size()) {
+					continue;
+				}
+				float y0 = signal[dist - 1];
+				float y1 = signal[dist];
+				float y2 = signal[dist + 1];
+				float y3 = signal[dist + 2];
+
+				float interpolated = interpolate(y0, y1, y2, t);
+				sum += interpolated;
+			}
+		}
+		for (int i = 0; i < receiverPos.size(); i++) {
+			for (int j = 0; j < receiverPos.size(); j++) {
+				float distance = p.odl(receiverPos[i]) + p.odl(receiverPos[j]);
+				float distFloat = distance * sampleRate / speedOfLight;
+				int dist = static_cast<int>(distFloat);
+				float t = distFloat - dist; // fractional part
+				auto& signal = signalsRxR[i * receiverPos.size() + j];
+				// Ensure dist and dist+1 are within bounds
+				if (dist < 1 || dist + 2 >= signal.size()) {
+					continue;
+				}
+				float y0 = signal[dist - 1];
+				float y1 = signal[dist];
+				float y2 = signal[dist + 1];
+				float y3 = signal[dist + 2];
+
+				float interpolated = interpolate(y0, y1, y2, t);
+				sum += interpolated;
+			}
+		}
+		return sum;
+	}
+	std::vector<Pos> getReceiverPos() const {
+		return receiverPos;
+	}
+	std::vector<Pos> getSenderPos() const {
+		return senderPos;
+	}
+	std::vector<Pos> getReflectorsPos() const {
+		return reflectorsPos;
+	}
+	void printData() {
+		int i = 0;
+		int j = 0;
+		for (int k = 0; k < timeCount; k++) {
+			printf("%f\n", signalsRxS[i * receiverCount + j][k]);
+		}
+	}
 };
 
 class Chunkholder {
@@ -798,6 +988,7 @@ glm::vec3 interpolateVertex(glm::vec3 p1, glm::vec3 p2, float val1, float val2, 
 void GenerateChunkMeshCPU(const Chunk& chunk, float isoLevel, std::vector<Vertex>& out_vertices) {
 	std::lock_guard<std::mutex> lock(chunk.vtxlock);
 	out_vertices.clear();
+	return;
 
 	const glm::vec3 cornerOffsets[] = {
 		{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},

@@ -22,6 +22,7 @@ struct WaterDrop {
 };
 
 void erosion_thread_lambda(MapManager& m) {
+	return;
 	// --- Simulation Parameters ---
 	const int MAX_LIFESPAN = 100;
 	const float GRAVITY = 9.81f;
@@ -156,8 +157,9 @@ int main() {
 	std::vector<glm::vec3> nor;
 	MapManager m(69420);
 
+	//m.noise.printData();
 
-	m.uptate({ 0,(long long)m.noise.getheight(0,0) + 2,0 }, 12);
+	m.uptate({ 0,(long long)m.noise.getheight(0,0) + 2,0 }, 6);
 	bool newpoints = 0;
 
 
@@ -169,14 +171,20 @@ int main() {
 	buffer glnorm;
 	Pos watp = { 0,(long long)m.noise.getheight(0,0) + 5,0 };
 
+	float scrool = 100.0f;
+	float scroolshift =10.0f;
+
+	o.scrool = &scrool;
+	o.scroolshift = &scroolshift;
+
 	std::thread tw([&]() {
 		while (1) {
 			std::chrono::milliseconds timespan(100);
 			std::this_thread::sleep_for(timespan);
 			printf("plpos x:%lf y:%lf z:%lf\n", o.playerpos.x, o.playerpos.y, o.playerpos.z);
-			printf("watpos x:%lld y:%lld z:%lld\n", watp.x, watp.y, watp.z);
+			printf("scrool:%lf,scroolshift:%lf\n", scrool, scroolshift);
 			Pos plpos = { (long long)o.playerpos.x,(long long)o.playerpos.y ,(long long)o.playerpos.z };
-			m.uptate(plpos, 10);
+			m.uptate(plpos, 15);
 			printf("chunks:%lld\n", m.renderchunks.size());
 			std::vector<glm::vec3> pointss;
 			std::vector<glm::vec3> norm;
@@ -184,10 +192,27 @@ int main() {
 			for(auto& chh : m.renderchunks) {
 				if (chh->ch->state == chunkempty)continue;
 				std::lock_guard<std::mutex> lock(chh->ch->vtxlock);
-				for (auto& vert : chh->ch->vertices) {
+				/*for (auto& vert : chh->ch->vertices) {
 					pointss.push_back({ vert.position.x + chh->position.x * chunkx, vert.position.y + chh->position.y * chunky, vert.position.z + chh->position.z * chunkz });
 					colrss.push_back({ 1, 1, 1 });
 					norm.push_back({ vert.normal.x, vert.normal.y, vert.normal.z });
+				}*/
+				for (int x = 0; x < chunkx; x++) {
+					for (int y = 0; y < chunky; y++) {
+						for (int z = 0; z < chunkz; z++) {
+							float v = chh->ch->v[x][y][z];
+							if (v > scrool) {
+								v -= scrool;
+								if (v > scroolshift)
+									v = 1;
+								else
+									v /= scroolshift;
+								pointss.push_back({ (chh->position.x * chunkx) + (float)x, (chh->position.y * chunky) + (float)y, (chh->position.z * chunkz) + (float)z });
+								colrss.push_back({v,v,v });
+								norm.push_back({ 0.0f, 1.0f, 0.0f }); // Assuming flat surface normals for simplicity
+							}
+						}
+					}
 				}
 			}
 			//for (auto chh : m.renderchunks) {
@@ -222,15 +247,40 @@ int main() {
 				}
 			}*/
 
-			pointss.push_back({ watp.x,watp.y + 0.1,watp.z });
-			colrss.push_back({ 1.0f,0.0f,1.0f });
-			norm.push_back({ 0.0f,1.0f,0.0f });
-			pointss.push_back({ watp.x,watp.y - 0.1,watp.z });
-			colrss.push_back({ 1.0f,0.0f,1.0f });
-			norm.push_back({ 0.0f,1.0f,0.0f });
-			pointss.push_back({ watp.x+0.1,watp.y,watp.z+0.1 });
-			colrss.push_back({ 1.0f,0.0f,1.0f });
-			norm.push_back({ 0.0f,1.0f,0.0f });
+			for (auto& sender : m.noise.getSenderPos()) {
+				pointss.push_back({ sender.x,sender.y + 0.1,sender.z });
+				colrss.push_back({ 1.0f,0.0f,1.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });
+				/*pointss.push_back({ sender.x,sender.y - 0.1,sender.z });
+				colrss.push_back({ 1.0f,0.0f,1.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });
+				pointss.push_back({ sender.x + 0.1,sender.y,sender.z + 0.1 });
+				colrss.push_back({ 1.0f,0.0f,1.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });*/
+			}
+			for(auto& receiver: m.noise.getReceiverPos()) {
+				pointss.push_back({ receiver.x,receiver.y ,receiver.z + 0.1 });
+				colrss.push_back({ 0.0f,1.0f,1.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });
+				/*pointss.push_back({ receiver.x,receiver.y ,receiver.z - 0.1 });
+				colrss.push_back({ 0.0f,1.0f,1.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });
+				pointss.push_back({ receiver.x + 0.1,receiver.y + 0.1,receiver.z  });
+				colrss.push_back({ 0.0f,1.0f,1.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });*/
+			}
+			for(auto& reflector: m.noise.getReflectorsPos()) {
+				pointss.push_back({ reflector.x + 0.1,reflector.y ,reflector.z });
+				colrss.push_back({ 1.0f,1.0f,0.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });
+				/*pointss.push_back({ reflector.x - 0.1,reflector.y ,reflector.z });
+				colrss.push_back({ 1.0f,1.0f,0.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });
+				pointss.push_back({ reflector.x ,reflector.y + 0.1,reflector.z + 0.1 });
+				colrss.push_back({ 1.0f,1.0f,0.0f });
+				norm.push_back({ 0.0f,1.0f,0.0f });*/
+			}
+
 
 			if (!newpoints) {
 				punkty.swap(pointss);
@@ -352,7 +402,7 @@ int main() {
 		o.setarg(0, glpoints, 3);
 		o.setarg(1, glcolors, 3);
 		o.setarg(2, glnorm, 3);
-		o.draw(torender, GL_TRIANGLES);
+		o.draw(torender, GL_POINTS);
 		o.wyswietl();
 	}
 	exit(0);
