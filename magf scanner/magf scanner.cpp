@@ -101,7 +101,7 @@ void erosion_thread_lambda(MapManager& m) {
 				// Deposit sediment aggressively if stuck or in a pit
 				float amount_to_deposit = drop.sediment * DEPOSITION_RATE;
 				float new_ground_value = ground_block_value + amount_to_deposit;
-				m.setblock(ground_pos, std::min(1.0f, new_ground_value)); // Write back
+				m.setblock(ground_pos, min(1.0f, new_ground_value)); // Write back
 				drop.sediment -= amount_to_deposit;
 				break; // Stop drop, it's stuck
 			} else { // Moving downhill, so erode or deposit based on capacity
@@ -112,25 +112,25 @@ void erosion_thread_lambda(MapManager& m) {
 					// Deposit sediment if over capacity
 					float amount_to_deposit = (drop.sediment - capacity) * DEPOSITION_RATE;
 					float new_ground_value = ground_block_value + amount_to_deposit;
-					m.setblock(ground_pos, std::min(1.0f, new_ground_value)); // Write back
+					m.setblock(ground_pos, min(1.0f, new_ground_value)); // Write back
 					drop.sediment -= amount_to_deposit;
 				} else if (height_delta > MIN_EROSION_DIFF) {
 					// Erode if under capacity and slope is steep enough
-					float amount_to_erode = std::min(
+					float amount_to_erode = min(
 						(capacity - drop.sediment) * EROSION_RATE,
 						height_delta / 2.0f // Don't erode more than half the slope
 					);
 					// Clamp erosion so block doesn't go below 0
-					amount_to_erode = std::min(amount_to_erode, ground_block_value);
+					amount_to_erode = min(amount_to_erode, ground_block_value);
 					float new_ground_value = ground_block_value - amount_to_erode;
-					m.setblock(ground_pos, std::max(0.0f, new_ground_value)); // Write back
+					m.setblock(ground_pos, max(0.0f, new_ground_value)); // Write back
 					drop.sediment += amount_to_erode;
 				}
 			}
 
 			// D. UPDATE DROP STATE AND MOVE
 			drop.velocity = std::sqrt(
-				std::max(0.0f, drop.velocity * drop.velocity + height_delta * GRAVITY)
+				max(0.0f, drop.velocity * drop.velocity + height_delta * GRAVITY)
 			);
 			drop.water *= (1.0f - EVAPORATION_RATE);
 			drop.pos = next_pos; // Move the drop to the new air block position
@@ -145,7 +145,7 @@ void erosion_thread_lambda(MapManager& m) {
 		float final_ground_value = m.blockat(final_ground_pos); // Read final value
 		if (final_ground_value > 0) { // Check if it's solid (or partially solid) to deposit on
 			float new_final_ground_value = final_ground_value + drop.sediment;
-			m.setblock(final_ground_pos, std::min(1.0f, new_final_ground_value)); // Write final value
+			m.setblock(final_ground_pos, min(1.0f, new_final_ground_value)); // Write final value
 		}
 	}
 }
@@ -283,6 +283,7 @@ int main() {
 
 
 			if (!newpoints) {
+				printf("points:%lld\n", pointss.size());
 				punkty.swap(pointss);
 				kolor.swap(colrss);
 				nor.swap(norm);
@@ -402,10 +403,10 @@ int main() {
 		o.setarg(0, glpoints, 3);
 		o.setarg(1, glcolors, 3);
 		o.setarg(2, glnorm, 3);
-		o.draw(torender, GL_POINTS);
+		o.drawXR(torender, GL_POINTS);
 		o.wyswietl();
 	}
-	exit(0);
+		exit(0);
 	return 0;
 }
 

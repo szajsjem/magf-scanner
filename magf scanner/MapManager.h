@@ -1426,7 +1426,7 @@ class MapManager {
 	}
 public:
 	MapManager(long long seed):noise(seed){
-		chunkss.reserve(32000000);
+		chunkss.reserve(320000);
 		loadchunkq.start_exec([&](const Pos& p) {
 			Chunkholder* c = chunkss[p];
 			if (c != NULL)

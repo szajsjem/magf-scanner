@@ -1,4 +1,6 @@
-#pragma once
+﻿#pragma once
+#define GLFW_EXPOSE_NATIVE_WIN32
+#define GLFW_EXPOSE_NATIVE_WGL
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -10,6 +12,21 @@
 #include <fstream>
 #include <algorithm>
 #include <sstream>
+#include <glm/gtc/quaternion.hpp>
+#include <GLFW/glfw3native.h>
+
+#define XR_USE_PLATFORM_WIN32
+#define XR_USE_GRAPHICS_API_OPENGL
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
+
+#define CHECK_XR(call) \
+    do { \
+        XrResult result = call; \
+        if (XR_FAILED(result)) { \
+            printf("XR call failed: %s = %d\n", #call, result); \
+        } \
+    } while(0)
 
 
 #define GLGL
@@ -257,12 +274,75 @@ public:
 class buffer {
 public:
 	GLuint buff;
-	buffer() {
+	size_t currentSize;
+
+	buffer() : buff(0), currentSize(0) {
 		glGenBuffers(1, &buff);
+		GLenum error = glGetError();
+		if (error != GL_NO_ERROR || buff == 0) {
+			printf("Failed to generate buffer: 0x%x\n", error);
+		}
 	}
-	void loadbuff(void *buffr,int size) {
+
+	void loadbuff(void* buffr, int size) {
+		if (buff == 0) {
+			printf("Buffer not initialized\n");
+			return;
+		}
+
+		if (buffr == nullptr) {
+			printf("Null buffer data pointer\n");
+			return;
+		}
+
+		if (size <= 0) {
+			printf("Invalid buffer size: %d\n", size);
+			return;
+		}
+
+		// Check if we have a valid OpenGL context
+		GLint currentProgram;
+		glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+		if (glGetError() != GL_NO_ERROR) {
+			printf("No valid OpenGL context for buffer operations\n");
+			return;
+		}
+
 		glBindBuffer(GL_ARRAY_BUFFER, buff);
+		GLenum bindError = glGetError();
+		if (bindError != GL_NO_ERROR) {
+			printf("Error binding buffer: 0x%x\n", bindError);
+			return;
+		}
+
+		// Use GL_STREAM_DRAW for frequently updated data
 		glBufferData(GL_ARRAY_BUFFER, size, buffr, GL_DYNAMIC_DRAW);
+		GLenum dataError = glGetError();
+		if (dataError != GL_NO_ERROR) {
+			printf("Error loading buffer data (size: %d): 0x%x\n", size, dataError);
+
+			// Try to diagnose the error
+			if (dataError == GL_OUT_OF_MEMORY) {
+				printf("  - Out of GPU memory\n");
+			}
+			else if (dataError == GL_INVALID_VALUE) {
+				printf("  - Invalid buffer size or usage\n");
+			}
+			return;
+		}
+
+		currentSize = size;
+
+		// Unbind buffer to avoid state pollution
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
+
+	bool isValid() const {
+		return buff != 0;
+	}
+
+	size_t getSize() const {
+		return currentSize;
 	}
 };
 
@@ -297,6 +377,10 @@ public:
 	}
 };
 
+static const XrPosef XR_POSE_IDENTITY = {
+  {0,0,0,1},   // orientation
+  {0,0,0}      // position
+};
 class oknogl {
 	double xold, yold;
 	int wys, szer;
@@ -320,6 +404,23 @@ public:
 	GLuint unilpow;
 	float lightpower=1;
 	GLuint uboTriangulation;
+
+	XrInstance                           xrInstance{ XR_NULL_HANDLE };
+	XrSession                            xrSession{ XR_NULL_HANDLE };
+	XrSystemId                           xrSystemId{ XR_NULL_SYSTEM_ID };
+	XrSpace                              xrAppSpace{ XR_NULL_HANDLE };
+	std::vector<XrViewConfigurationView> viewConfigViews;
+	std::vector<XrSwapchain>             swapchains;
+	std::vector<std::vector<XrSwapchainImageOpenGLKHR>> swapchainImages;
+	std::vector<std::vector<GLuint>> swapchainDepthBuffers;
+	std::vector<std::vector<GLuint>>     swapchainFramebuffers;
+	std::vector<XrView>                  xrViews;
+	std::vector<XrCompositionLayerProjectionView> projLayerViews;
+	XrFrameState                         frameState{ XR_TYPE_FRAME_STATE };
+	float                                nearZ{ 0.1f }, farZ{ 1000.0f };
+	int                                  eyeWidth{ 0 }, eyeHeight{ 0 };
+	glm::mat4                            projMat[2], viewMat[2];
+
 	oknogl() {
 		playerpos = glm::vec3(0, 0, 0);
 		viewkier = glm::vec3(1, 0, 0);
@@ -352,6 +453,227 @@ public:
 		if (glewInit() != GLEW_OK) {
 			fprintf(stderr, "Failed to initialize GLEW\n");
 		}
+
+		// --- 1) Create XR Instance ---
+		XrInstanceCreateInfo instCI{ XR_TYPE_INSTANCE_CREATE_INFO };
+		strcpy(instCI.applicationInfo.applicationName, "OpenXR GLFW Example");
+		instCI.applicationInfo.applicationVersion = 1;
+		strcpy(instCI.applicationInfo.engineName, "CustomEngine");
+		instCI.applicationInfo.engineVersion = 1;
+		instCI.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+		const char* exts[] = { XR_KHR_OPENGL_ENABLE_EXTENSION_NAME };
+		instCI.enabledExtensionCount = 1;
+		instCI.enabledExtensionNames = exts;
+		xrCreateInstance(&instCI, &xrInstance);
+
+		// --- 2) Get SystemId for HMD ---
+		XrSystemGetInfo sysGetInfo{ XR_TYPE_SYSTEM_GET_INFO };
+		sysGetInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+		xrGetSystem(xrInstance, &sysGetInfo, &xrSystemId);
+
+		// --- 3) Check GL requirements ---
+		PFN_xrGetOpenGLGraphicsRequirementsKHR pfnReq = nullptr;
+		xrGetInstanceProcAddr(xrInstance,
+			"xrGetOpenGLGraphicsRequirementsKHR",
+			(PFN_xrVoidFunction*)&pfnReq);
+		XrGraphicsRequirementsOpenGLKHR glReq{ XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR };
+		pfnReq(xrInstance, xrSystemId, &glReq);
+		// (optional) check_opengl_version(&glReq);
+
+		// --- 4) Create Session with graphics binding ---
+		XrGraphicsBindingOpenGLWin32KHR gfxBinding{
+		  XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR
+		};
+		gfxBinding.hDC = GetDC(glfwGetWin32Window(window));
+		gfxBinding.hGLRC = glfwGetWGLContext(window);
+
+		XrSessionCreateInfo sessCI{ XR_TYPE_SESSION_CREATE_INFO };
+		sessCI.next = &gfxBinding;
+		sessCI.systemId = xrSystemId;
+		xrCreateSession(xrInstance, &sessCI, &xrSession);
+
+		// --- 5) Create a local reference space ---
+		XrReferenceSpaceCreateInfo spaceCI{ XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
+		spaceCI.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+		spaceCI.poseInReferenceSpace = XR_POSE_IDENTITY;
+		xrCreateReferenceSpace(xrSession, &spaceCI, &xrAppSpace);
+
+		// --- 6) Enumerate stereo view configuration ---
+		uint32_t viewCount = 0;
+		xrEnumerateViewConfigurationViews(
+			xrInstance, xrSystemId,
+			XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+			0, &viewCount, nullptr);
+		viewConfigViews.resize(viewCount, { XR_TYPE_VIEW_CONFIGURATION_VIEW });
+		xrEnumerateViewConfigurationViews(
+			xrInstance, xrSystemId,
+			XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+			viewCount, &viewCount,
+			viewConfigViews.data());
+
+		eyeWidth = viewConfigViews[0].recommendedImageRectWidth;
+		eyeHeight = viewConfigViews[0].recommendedImageRectHeight;
+
+		// --- 7) Create one swapchain per eye ---
+		swapchains.resize(viewCount);
+		swapchainImages.resize(viewCount);
+		swapchainFramebuffers.resize(viewCount);
+		swapchainDepthBuffers.resize(viewCount);
+		xrViews.resize(viewCount, { XR_TYPE_VIEW });
+		projLayerViews.resize(viewCount, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW });
+
+		for (uint32_t i = 0; i < viewCount; i++) {
+			// Pick preferred format
+			uint32_t fmtCount = 0;
+			xrEnumerateSwapchainFormats(xrSession, 0, &fmtCount, nullptr);
+			std::vector<int64_t> fmts(fmtCount);
+			xrEnumerateSwapchainFormats(xrSession, fmtCount, &fmtCount, fmts.data());
+
+			int64_t chosenFmt = GL_SRGB8_ALPHA8;
+			if (!std::count(fmts.begin(), fmts.end(), chosenFmt)) {
+				// Try common fallback formats
+				std::vector<int64_t> fallbacks = { GL_RGBA8, GL_RGB8, GL_RGBA16F };
+				chosenFmt = fmts[0]; // Default fallback
+				for (auto fallback : fallbacks) {
+					if (std::count(fmts.begin(), fmts.end(), fallback)) {
+						chosenFmt = fallback;
+						break;
+					}
+				}
+			}
+			printf("Using color format: 0x%llx for eye %d\n", chosenFmt, i);
+
+			XrSwapchainCreateInfo sci{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
+			sci.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+			sci.format = chosenFmt;
+			sci.sampleCount = viewConfigViews[i].recommendedSwapchainSampleCount;
+			sci.width = eyeWidth;
+			sci.height = eyeHeight;
+			sci.faceCount = 1;
+			sci.arraySize = 1;
+			sci.mipCount = 1;
+
+			XrResult createResult = xrCreateSwapchain(xrSession, &sci, &swapchains[i]);
+			if (XR_FAILED(createResult)) {
+				printf("Failed to create swapchain for eye %d: %d\n", i, createResult);
+				continue;
+			}
+
+			// Get swapchain images
+			uint32_t nImages = 0;
+			xrEnumerateSwapchainImages(swapchains[i], 0, &nImages, nullptr);
+			swapchainImages[i].resize(nImages, { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR });
+			xrEnumerateSwapchainImages(swapchains[i], nImages, &nImages,
+				(XrSwapchainImageBaseHeader*)swapchainImages[i].data());
+
+			printf("Eye %d: Created %d swapchain images\n", i, nImages);
+
+			// Create framebuffers and depth buffers
+			swapchainFramebuffers[i].resize(nImages);
+			swapchainDepthBuffers[i].resize(nImages);
+
+			glGenFramebuffers((GLsizei)nImages, swapchainFramebuffers[i].data());
+			glGenRenderbuffers((GLsizei)nImages, swapchainDepthBuffers[i].data());
+
+			// Check for OpenGL errors after generation
+			GLenum genError = glGetError();
+			if (genError != GL_NO_ERROR) {
+				printf("OpenGL error after generating buffers for eye %d: 0x%x\n", i, genError);
+			}
+
+			// Setup each framebuffer
+			for (size_t j = 0; j < nImages; j++) {
+				// Verify swapchain image is valid
+				if (swapchainImages[i][j].image == 0) {
+					printf("Invalid swapchain image %zu for eye %d\n", j, i);
+					continue;
+				}
+
+				// Setup depth buffer first
+				glBindRenderbuffer(GL_RENDERBUFFER, swapchainDepthBuffers[i][j]);
+				glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, eyeWidth, eyeHeight);
+
+				GLenum depthError = glGetError();
+				if (depthError != GL_NO_ERROR) {
+					printf("Error creating depth buffer %zu for eye %d: 0x%x\n", j, i, depthError);
+				}
+
+				// Setup framebuffer
+				glBindFramebuffer(GL_FRAMEBUFFER, swapchainFramebuffers[i][j]);
+
+				// Attach color texture
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+					GL_TEXTURE_2D, swapchainImages[i][j].image, 0);
+
+				GLenum colorError = glGetError();
+				if (colorError != GL_NO_ERROR) {
+					printf("Error attaching color texture %zu for eye %d: 0x%x\n", j, i, colorError);
+				}
+
+				// Attach depth buffer
+				glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+					GL_RENDERBUFFER, swapchainDepthBuffers[i][j]);
+
+				GLenum depthAttachError = glGetError();
+				if (depthAttachError != GL_NO_ERROR) {
+					printf("Error attaching depth buffer %zu for eye %d: 0x%x\n", j, i, depthAttachError);
+				}
+
+				// Check framebuffer completeness
+				GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+				if (status != GL_FRAMEBUFFER_COMPLETE) {
+					printf("Framebuffer %zu for eye %d incomplete: 0x%x\n", j, i, status);
+
+					// Debug incomplete framebuffer
+					switch (status) {
+					case GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT:
+						printf("  - GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT\n");
+						break;
+					case GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT:
+						printf("  - GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT\n");
+						break;
+					case GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER:
+						printf("  - GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER\n");
+						break;
+					case GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER:
+						printf("  - GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER\n");
+						break;
+					case GL_FRAMEBUFFER_UNSUPPORTED:
+						printf("  - GL_FRAMEBUFFER_UNSUPPORTED\n");
+						break;
+					case GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE:
+						printf("  - GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE\n");
+						break;
+					case GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS:
+						printf("  - GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS\n");
+						break;
+					default:
+						printf("  - Unknown framebuffer error: 0x%x\n", status);
+						break;
+					}
+
+					// Try to get more info about attachments
+					GLint colorAttachmentType, depthAttachmentType;
+					glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+						GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &colorAttachmentType);
+					glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+						GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &depthAttachmentType);
+
+					printf("  - Color attachment type: 0x%x, Depth attachment type: 0x%x\n",
+						colorAttachmentType, depthAttachmentType);
+				}
+				else {
+					printf("Framebuffer %zu for eye %d setup successfully\n", j, i);
+				}
+			}
+
+			// Cleanup - unbind everything
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+			printf("Completed setup for eye %d with %zu framebuffers\n", i, nImages);
+		}
+
 		glEnable(GL_PROGRAM_POINT_SIZE);
 		glEnable(GL_DEPTH_TEST);
 		glDepthFunc(GL_LESS);
@@ -365,13 +687,6 @@ public:
 		glfwGetCursorPos(window, &xold, &yold);
 		glfwSetKeyCallback(window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {return ((oknogl*)(glfwGetWindowUserPointer(window)))->keycb(window, key, scancode, action, mods); });
 		glfwSetCursorPosCallback(window, [](GLFWwindow* window, double xpos, double ypos) {return ((oknogl*)(glfwGetWindowUserPointer(window)))->mousecb(window, xpos,ypos); });
-
-
-		glGenBuffers(1, &uboTriangulation);
-		glBindBuffer(GL_UNIFORM_BUFFER, uboTriangulation);
-		glBufferData(GL_UNIFORM_BUFFER, sizeof(triangulation), triangulation, GL_STATIC_DRAW);
-		glBindBuffer(GL_UNIFORM_BUFFER, 0);
-
 		glfwSetScrollCallback(window, [](GLFWwindow* window, double xoffset, double yoffset) {return ((oknogl*)(glfwGetWindowUserPointer(window)))->scroll_callback(window, xoffset, yoffset); });
 	}
 	void keycb(GLFWwindow* window, int key, int scancode, int action, int mods) {
@@ -439,6 +754,75 @@ public:
 		}
 	}
 	void startframe(shader s) {
+
+		printf("Frame %lld: shouldRender=%s, views=%zu\n",
+			frameState.predictedDisplayTime,
+			frameState.shouldRender ? "true" : "false",
+			xrViews.size());
+
+		glfwPollEvents();
+
+		// 1) handle XR events (session start/stop)
+		XrEventDataBuffer ev{ XR_TYPE_EVENT_DATA_BUFFER };
+		while (xrPollEvent(xrInstance, &ev) == XR_SUCCESS) {
+			if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+				auto* ss = (XrEventDataSessionStateChanged*)&ev;
+				if (ss->state == XR_SESSION_STATE_READY) {
+					XrSessionBeginInfo sessionBeginInfo = {
+						XR_TYPE_SESSION_BEGIN_INFO, // type  
+						nullptr,                    // next  
+						XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO // primary stereo view configuration  
+					};
+					xrBeginSession(xrSession, &sessionBeginInfo);
+				}
+				if (ss->state == XR_SESSION_STATE_STOPPING) {
+					xrEndSession(xrSession);
+				}
+			}
+			ev.type = XR_TYPE_EVENT_DATA_BUFFER;
+		}
+
+		// 2) xrWaitFrame + xrBeginFrame
+		xrWaitFrame(xrSession, nullptr, &frameState);
+		xrBeginFrame(xrSession, nullptr);
+
+		// 3) locateViews → head‐tracked poses + FOVs
+		XrViewLocateInfo vli{ XR_TYPE_VIEW_LOCATE_INFO };
+		vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+		vli.displayTime = frameState.predictedDisplayTime;
+		vli.space = xrAppSpace;
+
+		XrViewState vs{ XR_TYPE_VIEW_STATE };
+		uint32_t     actualCount = (uint32_t)xrViews.size();
+		xrLocateViews(xrSession, &vli, &vs, actualCount, &actualCount,
+			xrViews.data());
+
+
+		// 4) build glm projection & view matrices
+		for (uint32_t i = 0; i < actualCount; i++) {
+			auto& xv = xrViews[i];
+			float l = -xv.fov.angleLeft * nearZ;
+			float r = xv.fov.angleRight * nearZ;
+			float b = -xv.fov.angleDown * nearZ;
+			float u = xv.fov.angleUp * nearZ;
+			projMat[i] = glm::frustum(l, r, b, u, nearZ, farZ);
+
+			// pose → mat4
+			glm::quat q{
+			  xv.pose.orientation.w,
+			  xv.pose.orientation.x,
+			  xv.pose.orientation.y,
+			  xv.pose.orientation.z
+			};
+			glm::mat4 rot = glm::mat4_cast(q);
+			glm::mat4 trans = glm::translate(
+				glm::mat4(1.0f),
+				glm::vec3(xv.pose.position.x,
+					xv.pose.position.y,
+					xv.pose.position.z));
+			viewMat[i] = glm::inverse(trans * rot);
+		}
+
 		glUseProgram(s.ProgramID);
 		uniMVP = glGetUniformLocation(s.ProgramID, "MVP");
 		uniV = glGetUniformLocation(s.ProgramID, "V");
@@ -467,11 +851,6 @@ public:
 		glUniform3f(viewPos, playerpos.x, playerpos.y, playerpos.z);
 		glUniform3f(unilcol, lightcolor.x, lightcolor.y, lightcolor.z);
 		glUniform1f(unilpow, lightpower);
-		{
-			GLuint block_index = glGetUniformBlockIndex(s.ProgramID, "TriangulationTable");
-			glUniformBlockBinding(s.ProgramID, block_index, 0);
-			glBindBufferBase(GL_UNIFORM_BUFFER, 0, uboTriangulation);
-		}
 	}
 	void setarg(int argnum, buffer b,int size,int type=GL_FLOAT) {
 		glEnableVertexAttribArray(argnum);
@@ -485,13 +864,160 @@ public:
 			(void*)0            
 		);
 	}
+	void renderTestPoints() {
+		// Test if points render at all
+		glPointSize(20.0f);
+		glBegin(GL_POINTS);
+		glColor3f(0.0f, 1.0f, 0.0f);
+		glVertex3f(0.0f, 0.0f, -2.0f);
+		glVertex3f(1.0f, 0.0f, -2.0f);
+		glVertex3f(-1.0f, 0.0f, -2.0f);
+		glEnd();
+	}
 	void draw(int ed,int type=GL_TRIANGLES,int st=0) {
 		glDrawArrays(type, st, ed);
 	}
+	void drawXR(int ed, int type = GL_TRIANGLES, int st = 0) {
+		// Early exit if no vertices
+		if (ed <= 0) return;
+
+		// Check if frameState indicates we should render
+		if (!frameState.shouldRender) {
+			printf("Frame state indicates we shouldn't render\n");
+			return;
+		}
+
+		// Store current OpenGL state
+		GLint oldFramebuffer;
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &oldFramebuffer);
+
+		for (uint32_t eye = 0; eye < xrViews.size() && eye < swapchains.size(); eye++) {
+			// 1) Acquire swapchain image
+			uint32_t imgIndex = 0;
+			XrSwapchainImageAcquireInfo acquireInfo{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+			XrResult acquireResult = xrAcquireSwapchainImage(swapchains[eye], &acquireInfo, &imgIndex);
+			if (XR_FAILED(acquireResult)) {
+				printf("Failed to acquire swapchain image for eye %d: %d\n", eye, acquireResult);
+				continue;
+			}
+
+			// Check if image index is valid
+			if (imgIndex >= swapchainFramebuffers[eye].size()) {
+				printf("Invalid image index %d for eye %d (max: %zu)\n", imgIndex, eye, swapchainFramebuffers[eye].size());
+				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
+				continue;
+			}
+
+			// 2) Wait for swapchain image
+			XrSwapchainImageWaitInfo waitInfo{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+			waitInfo.timeout = 100000000; // 100ms timeout (reduced from 1s)
+			XrResult waitResult = xrWaitSwapchainImage(swapchains[eye], &waitInfo);
+			if (XR_FAILED(waitResult)) {
+				printf("Failed to wait for swapchain image for eye %d: %d\n", eye, waitResult);
+				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
+				continue;
+			}
+
+			// 3) Bind the pre-configured framebuffer (DON'T re-attach textures)
+			GLuint fbo = swapchainFramebuffers[eye][imgIndex];
+			if (fbo == 0) {
+				printf("Invalid framebuffer for eye %d, image %d\n", eye, imgIndex);
+				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
+				continue;
+			}
+
+			glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+			// Quick framebuffer check (optional, remove if performance is critical)
+			GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+			if (status != GL_FRAMEBUFFER_COMPLETE) {
+				printf("Framebuffer not complete for eye %d, image %d: 0x%x\n", eye, imgIndex, status);
+				glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
+				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
+				continue;
+			}
+
+			// 4) Set viewport and clear
+			glViewport(0, 0, eyeWidth, eyeHeight);
+
+			// Clear with a subtle eye-specific tint for debugging
+			glClearColor(eye * 0.05f, 0.0f, 0.1f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			// 5) Set matrices and uniforms
+			glm::mat4 MVP = projMat[eye] * viewMat[eye];
+			glUniformMatrix4fv(uniMVP, 1, GL_FALSE, &MVP[0][0]);
+			glUniformMatrix4fv(uniV, 1, GL_FALSE, &viewMat[eye][0][0]);
+
+			// Update per-eye uniforms
+			glm::vec3 eyePos = glm::vec3(xrViews[eye].pose.position.x,
+				xrViews[eye].pose.position.y,
+				xrViews[eye].pose.position.z);
+			glUniform3f(viewPos, eyePos.x, eyePos.y, eyePos.z);
+			glUniform3f(unilpos, lightpos.x, lightpos.y, lightpos.z);
+			glUniform3f(unilcol, lightcolor.x, lightcolor.y, lightcolor.z);
+			glUniform1f(unilpow, lightpower);
+
+			// 6) Set OpenGL state for rendering
+			glEnable(GL_DEPTH_TEST);
+			glDepthFunc(GL_LESS);
+
+			if (type == GL_POINTS) {
+				glEnable(GL_PROGRAM_POINT_SIZE);
+			}
+
+			// 7) Render
+			glDrawArrays(type, st, ed);
+
+			// Check for rendering errors
+			GLenum renderError = glGetError();
+			if (renderError != GL_NO_ERROR) {
+				printf("OpenGL error during rendering eye %d: 0x%x\n", eye, renderError);
+			}
+
+			// 8) Unbind framebuffer before release
+			glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
+
+			// 9) Release swapchain image
+			XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+			XrResult releaseResult = xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
+			if (XR_FAILED(releaseResult)) {
+				printf("Failed to release swapchain image for eye %d: %d\n", eye, releaseResult);
+			}
+
+			// 10) Setup composition layer for this eye
+			projLayerViews[eye].pose = xrViews[eye].pose;
+			projLayerViews[eye].fov = xrViews[eye].fov;
+			projLayerViews[eye].subImage.swapchain = swapchains[eye];
+			projLayerViews[eye].subImage.imageArrayIndex = 0;
+			projLayerViews[eye].subImage.imageRect.offset = { 0, 0 };
+			projLayerViews[eye].subImage.imageRect.extent = { eyeWidth, eyeHeight };
+		}
+	}
 	void wyswietl() {
-		glDisableVertexAttribArray(0);
+		XrCompositionLayerProjection layer{
+			XR_TYPE_COMPOSITION_LAYER_PROJECTION
+		};
+		layer.space = xrAppSpace;
+		layer.viewCount = (uint32_t)projLayerViews.size();
+		layer.views = projLayerViews.data();
+
+		const XrCompositionLayerBaseHeader* layers[] = {
+		  (const XrCompositionLayerBaseHeader*)&layer
+		};
+		XrFrameEndInfo xrfei{
+			  XR_TYPE_FRAME_END_INFO,nullptr,
+			  frameState.predictedDisplayTime, 
+			  XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
+			  1, layers
+		};
+		xrEndFrame(xrSession,
+			&xrfei);
 		glfwSwapBuffers(window);
-		glfwPollEvents();
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	}
 };
