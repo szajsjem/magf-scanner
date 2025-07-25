@@ -140,6 +140,7 @@
   <ItemGroup>
     <ClInclude Include="atabinf.h" />
     <ClInclude Include="glrender.h" />
+    <ClInclude Include="magf scanner.h" />
     <ClInclude Include="MapManager.h" />
     <ClInclude Include="pnoise.h" />
     <ClInclude Include="punkt.h" />

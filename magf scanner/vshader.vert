@@ -11,7 +11,7 @@ out vec3 fragmentPosition;
 uniform mat4 MVP;
 uniform mat4 V;
 uniform float jitterAmount = 0.05; // Adjust as needed
-uniform float pointSize = 5.0;
+uniform float pointSize = 3.0;
 
 // Hash function to generate a pseudo-random value from a vec3
 float hash(vec3 p) {

@@ -49,6 +49,13 @@ public:
             if (thread.joinable()) thread.join();
         }
     }
+    void cleanup() {
+        should_terminate = true;
+        cv.notify_all();
+        for (auto& thread : threads) {
+            if (thread.joinable()) thread.join();
+        }
+    }
 
     Queue(const Queue&) = delete;
     Queue& operator=(const Queue&) = delete;

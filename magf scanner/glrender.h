@@ -274,9 +274,8 @@ public:
 class buffer {
 public:
 	GLuint buff;
-	size_t currentSize;
 
-	buffer() : buff(0), currentSize(0) {
+	buffer(){
 		glGenBuffers(1, &buff);
 		GLenum error = glGetError();
 		if (error != GL_NO_ERROR || buff == 0) {
@@ -285,20 +284,7 @@ public:
 	}
 
 	void loadbuff(void* buffr, int size) {
-		if (buff == 0) {
-			printf("Buffer not initialized\n");
-			return;
-		}
-
-		if (buffr == nullptr) {
-			printf("Null buffer data pointer\n");
-			return;
-		}
-
-		if (size <= 0) {
-			printf("Invalid buffer size: %d\n", size);
-			return;
-		}
+		
 
 		// Check if we have a valid OpenGL context
 		GLint currentProgram;
@@ -330,19 +316,6 @@ public:
 			}
 			return;
 		}
-
-		currentSize = size;
-
-		// Unbind buffer to avoid state pollution
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
-	}
-
-	bool isValid() const {
-		return buff != 0;
-	}
-
-	size_t getSize() const {
-		return currentSize;
 	}
 };
 
@@ -753,25 +726,20 @@ public:
 		}
 		}
 	}
+	// Fixed startframe method
 	void startframe(shader s) {
-
-		printf("Frame %lld: shouldRender=%s, views=%zu\n",
-			frameState.predictedDisplayTime,
-			frameState.shouldRender ? "true" : "false",
-			xrViews.size());
-
 		glfwPollEvents();
 
-		// 1) handle XR events (session start/stop)
+		// 1) Handle XR events
 		XrEventDataBuffer ev{ XR_TYPE_EVENT_DATA_BUFFER };
 		while (xrPollEvent(xrInstance, &ev) == XR_SUCCESS) {
 			if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
 				auto* ss = (XrEventDataSessionStateChanged*)&ev;
 				if (ss->state == XR_SESSION_STATE_READY) {
 					XrSessionBeginInfo sessionBeginInfo = {
-						XR_TYPE_SESSION_BEGIN_INFO, // type  
-						nullptr,                    // next  
-						XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO // primary stereo view configuration  
+						XR_TYPE_SESSION_BEGIN_INFO,
+						nullptr,
+						XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
 					};
 					xrBeginSession(xrSession, &sessionBeginInfo);
 				}
@@ -782,47 +750,79 @@ public:
 			ev.type = XR_TYPE_EVENT_DATA_BUFFER;
 		}
 
-		// 2) xrWaitFrame + xrBeginFrame
+		// 2) XR frame timing
 		xrWaitFrame(xrSession, nullptr, &frameState);
 		xrBeginFrame(xrSession, nullptr);
 
-		// 3) locateViews → head‐tracked poses + FOVs
+		// 3) Get head-tracked poses and FOVs
 		XrViewLocateInfo vli{ XR_TYPE_VIEW_LOCATE_INFO };
 		vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
 		vli.displayTime = frameState.predictedDisplayTime;
 		vli.space = xrAppSpace;
 
 		XrViewState vs{ XR_TYPE_VIEW_STATE };
-		uint32_t     actualCount = (uint32_t)xrViews.size();
-		xrLocateViews(xrSession, &vli, &vs, actualCount, &actualCount,
-			xrViews.data());
+		uint32_t actualCount = (uint32_t)xrViews.size();
+		xrLocateViews(xrSession, &vli, &vs, actualCount, &actualCount, xrViews.data());
 
+		glm::quat headOrientation{ xrViews[0].pose.orientation.w,
+								  xrViews[0].pose.orientation.x,
+								  xrViews[0].pose.orientation.y,
+								  xrViews[0].pose.orientation.z };
+		glm::vec3 headRelativePos{ xrViews[0].pose.position.x,
+								  xrViews[0].pose.position.y,
+								  xrViews[0].pose.position.z };
 
-		// 4) build glm projection & view matrices
+		// 5) MODIFIED: Handle keyboard movement based on HMD orientation
+		// Your original forward direction was +X, so we rotate that by the HMD's orientation.
+		glm::vec3 headForwardFull = headOrientation * glm::vec3(1.0f, 0.0f, 0.0f);
+		// For keyboard movement, we only care about the horizontal direction (yaw).
+		glm::vec3 moveDirection =
+			glm::normalize(glm::vec3(headForwardFull.x, 0.0f, headForwardFull.z));
+		// Calculate the "right" vector for strafing.
+		glm::vec3 moveRight =
+			glm::normalize(glm::cross(moveDirection, glm::vec3(0.0f, 1.0f, 0.0f)));
+
+		// Calculate acceleration from keyboard input (`przysp`)
+		// przysp.r is Fwd/Back, przysp.b is Left/Right
+		glm::vec3 acceleration = moveDirection * przysp.r + moveRight * przysp.b;
+		acceleration.y = przysp.g; // Vertical movement is separate
+		acceleration *= przyspmult;
+
+		// Apply simple physics
+		predkosc += acceleration;
+		predkosc *= 0.8f; // Damping
+		playerpos += predkosc; // Update the base player position
+
+		// 4) Build XR projection & view matrices (CORRECT FOV HANDLING)
 		for (uint32_t i = 0; i < actualCount; i++) {
 			auto& xv = xrViews[i];
-			float l = -xv.fov.angleLeft * nearZ;
-			float r = xv.fov.angleRight * nearZ;
-			float b = -xv.fov.angleDown * nearZ;
-			float u = xv.fov.angleUp * nearZ;
-			projMat[i] = glm::frustum(l, r, b, u, nearZ, farZ);
 
-			// pose → mat4
-			glm::quat q{
-			  xv.pose.orientation.w,
-			  xv.pose.orientation.x,
-			  xv.pose.orientation.y,
-			  xv.pose.orientation.z
-			};
-			glm::mat4 rot = glm::mat4_cast(q);
-			glm::mat4 trans = glm::translate(
-				glm::mat4(1.0f),
-				glm::vec3(xv.pose.position.x,
-					xv.pose.position.y,
-					xv.pose.position.z));
+			// Asymmetric frustum projection (Correctly implemented)
+			projMat[i] = glm::frustum(
+				tanf(xv.fov.angleLeft) * nearZ,
+				tanf(xv.fov.angleRight) * nearZ,
+				tanf(xv.fov.angleDown) * nearZ,
+				tanf(xv.fov.angleUp) * nearZ,
+				nearZ,
+				farZ
+			);
+
+			// View matrix combines artificial locomotion (playerpos) and tracked head pose
+			glm::quat eyeQuat{ xv.pose.orientation.w,
+							  xv.pose.orientation.x,
+							  xv.pose.orientation.y,
+							  xv.pose.orientation.z };
+			glm::vec3 eyePos{
+				xv.pose.position.x, xv.pose.position.y, xv.pose.position.z };
+			glm::mat4 rot = glm::mat4_cast(eyeQuat);
+			// The final camera position in the world is the base + the HMD's offset
+			glm::mat4 trans = glm::translate(glm::mat4(1.0f), playerpos + eyePos);
 			viewMat[i] = glm::inverse(trans * rot);
 		}
 
+		lightpos = playerpos + headRelativePos;
+
+		// 5) Setup shader uniforms
 		glUseProgram(s.ProgramID);
 		uniMVP = glGetUniformLocation(s.ProgramID, "MVP");
 		uniV = glGetUniformLocation(s.ProgramID, "V");
@@ -831,27 +831,20 @@ public:
 		unilcol = glGetUniformLocation(s.ProgramID, "LightColor");
 		unilpow = glGetUniformLocation(s.ProgramID, "LightPower");
 		projection = glm::perspective(glm::radians(55.0f), szer / (float)wys, 0.1f, 10000.0f);
-		glm::vec3 przyspt = przysp ;
-		float t = sqrt(viewkier.r * viewkier.r + viewkier.b * viewkier.b);
-		rot(przyspt.r, przyspt.b, viewkier.b/t, viewkier.r/t);
-		przyspt *= przyspmult;
-		predkosc += przyspt;
-		predkosc *= 0.8;
-		playerpos += predkosc;
-		glm::mat4 View = glm::lookAt(
+
+		desktopViewMat = glm::lookAt(
 			playerpos,
-			playerpos+viewkier,
-			headpos 
+			playerpos + viewkier,
+			headpos
 		);
-		glm::mat4 MVP = projection * View;
-		lightpos = playerpos;
-		glUniformMatrix4fv(uniMVP, 1, GL_FALSE, &MVP[0][0]);
-		glUniformMatrix4fv(uniV, 1, GL_FALSE, &View[0][0]);
+		desktopMVP = projection * desktopViewMat;
+
 		glUniform3f(unilpos, lightpos.x, lightpos.y, lightpos.z);
-		glUniform3f(viewPos, playerpos.x, playerpos.y, playerpos.z);
 		glUniform3f(unilcol, lightcolor.x, lightcolor.y, lightcolor.z);
 		glUniform1f(unilpow, lightpower);
 	}
+	glm::mat4 desktopViewMat;
+	glm::mat4 desktopMVP;
 	void setarg(int argnum, buffer b,int size,int type=GL_FLOAT) {
 		glEnableVertexAttribArray(argnum);
 		glBindBuffer(GL_ARRAY_BUFFER, b.buff);
@@ -864,6 +857,9 @@ public:
 			(void*)0            
 		);
 	}
+	void cleanup() {
+		glfwDestroyWindow(window);
+	}
 	void renderTestPoints() {
 		// Test if points render at all
 		glPointSize(20.0f);
@@ -875,121 +871,74 @@ public:
 		glEnd();
 	}
 	void draw(int ed,int type=GL_TRIANGLES,int st=0) {
+		glUniformMatrix4fv(uniMVP, 1, GL_FALSE, &desktopMVP[0][0]);
+		glUniformMatrix4fv(uniV, 1, GL_FALSE, &desktopViewMat[0][0]);
+		glUniform3f(viewPos, playerpos.x, playerpos.y, playerpos.z);
 		glDrawArrays(type, st, ed);
 	}
 	void drawXR(int ed, int type = GL_TRIANGLES, int st = 0) {
-		// Early exit if no vertices
 		if (ed <= 0) return;
+		if (!frameState.shouldRender) return;
 
-		// Check if frameState indicates we should render
-		if (!frameState.shouldRender) {
-			printf("Frame state indicates we shouldn't render\n");
-			return;
-		}
-
-		// Store current OpenGL state
 		GLint oldFramebuffer;
 		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &oldFramebuffer);
 
 		for (uint32_t eye = 0; eye < xrViews.size() && eye < swapchains.size(); eye++) {
-			// 1) Acquire swapchain image
+			// Acquire swapchain image
 			uint32_t imgIndex = 0;
 			XrSwapchainImageAcquireInfo acquireInfo{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-			XrResult acquireResult = xrAcquireSwapchainImage(swapchains[eye], &acquireInfo, &imgIndex);
-			if (XR_FAILED(acquireResult)) {
-				printf("Failed to acquire swapchain image for eye %d: %d\n", eye, acquireResult);
+			if (XR_FAILED(xrAcquireSwapchainImage(swapchains[eye], &acquireInfo, &imgIndex))) {
 				continue;
 			}
 
-			// Check if image index is valid
-			if (imgIndex >= swapchainFramebuffers[eye].size()) {
-				printf("Invalid image index %d for eye %d (max: %zu)\n", imgIndex, eye, swapchainFramebuffers[eye].size());
-				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
-				continue;
-			}
-
-			// 2) Wait for swapchain image
+			// Wait for image
 			XrSwapchainImageWaitInfo waitInfo{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
-			waitInfo.timeout = 100000000; // 100ms timeout (reduced from 1s)
-			XrResult waitResult = xrWaitSwapchainImage(swapchains[eye], &waitInfo);
-			if (XR_FAILED(waitResult)) {
-				printf("Failed to wait for swapchain image for eye %d: %d\n", eye, waitResult);
+			waitInfo.timeout = 100000000;
+			if (XR_FAILED(xrWaitSwapchainImage(swapchains[eye], &waitInfo))) {
 				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
 				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
 				continue;
 			}
 
-			// 3) Bind the pre-configured framebuffer (DON'T re-attach textures)
-			GLuint fbo = swapchainFramebuffers[eye][imgIndex];
-			if (fbo == 0) {
-				printf("Invalid framebuffer for eye %d, image %d\n", eye, imgIndex);
-				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
-				continue;
-			}
-
-			glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-
-			// Quick framebuffer check (optional, remove if performance is critical)
-			GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-			if (status != GL_FRAMEBUFFER_COMPLETE) {
-				printf("Framebuffer not complete for eye %d, image %d: 0x%x\n", eye, imgIndex, status);
-				glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
-				XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-				xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
-				continue;
-			}
-
-			// 4) Set viewport and clear
+			// Bind framebuffer
+			glBindFramebuffer(GL_FRAMEBUFFER, swapchainFramebuffers[eye][imgIndex]);
 			glViewport(0, 0, eyeWidth, eyeHeight);
 
-			// Clear with a subtle eye-specific tint for debugging
+			// Clear with eye-specific tint
 			glClearColor(eye * 0.05f, 0.0f, 0.1f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-			// 5) Set matrices and uniforms
-			glm::mat4 MVP = projMat[eye] * viewMat[eye];
+			// CORRECT: Set per-eye MVP matrix
+			glm::mat4 unscaledViewMat = viewMat[eye];
+			glm::mat4 scaledViewMat = glm::scale(unscaledViewMat, glm::vec3(0.1f));
+			glm::mat4 MVP = projMat[eye] * scaledViewMat;
 			glUniformMatrix4fv(uniMVP, 1, GL_FALSE, &MVP[0][0]);
 			glUniformMatrix4fv(uniV, 1, GL_FALSE, &viewMat[eye][0][0]);
 
-			// Update per-eye uniforms
-			glm::vec3 eyePos = glm::vec3(xrViews[eye].pose.position.x,
-				xrViews[eye].pose.position.y,
-				xrViews[eye].pose.position.z);
-			glUniform3f(viewPos, eyePos.x, eyePos.y, eyePos.z);
-			glUniform3f(unilpos, lightpos.x, lightpos.y, lightpos.z);
-			glUniform3f(unilcol, lightcolor.x, lightcolor.y, lightcolor.z);
-			glUniform1f(unilpow, lightpower);
+			// Set per-eye view position
+			glm::vec3 eyeWorldPos = playerpos +
+				glm::vec3(
+					xrViews[eye].pose.position.x,
+					xrViews[eye].pose.position.y,
+					xrViews[eye].pose.position.z
+				);
+			glUniform3f(viewPos, eyeWorldPos.x, eyeWorldPos.y, eyeWorldPos.z);
 
-			// 6) Set OpenGL state for rendering
+			// Render
 			glEnable(GL_DEPTH_TEST);
 			glDepthFunc(GL_LESS);
-
 			if (type == GL_POINTS) {
 				glEnable(GL_PROGRAM_POINT_SIZE);
 			}
 
-			// 7) Render
 			glDrawArrays(type, st, ed);
 
-			// Check for rendering errors
-			GLenum renderError = glGetError();
-			if (renderError != GL_NO_ERROR) {
-				printf("OpenGL error during rendering eye %d: 0x%x\n", eye, renderError);
-			}
+			// Cleanup
 
-			// 8) Unbind framebuffer before release
-			glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
-
-			// 9) Release swapchain image
 			XrSwapchainImageReleaseInfo releaseInfo{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-			XrResult releaseResult = xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
-			if (XR_FAILED(releaseResult)) {
-				printf("Failed to release swapchain image for eye %d: %d\n", eye, releaseResult);
-			}
+			xrReleaseSwapchainImage(swapchains[eye], &releaseInfo);
 
-			// 10) Setup composition layer for this eye
+			// Setup composition layer
 			projLayerViews[eye].pose = xrViews[eye].pose;
 			projLayerViews[eye].fov = xrViews[eye].fov;
 			projLayerViews[eye].subImage.swapchain = swapchains[eye];
@@ -997,6 +946,7 @@ public:
 			projLayerViews[eye].subImage.imageRect.offset = { 0, 0 };
 			projLayerViews[eye].subImage.imageRect.extent = { eyeWidth, eyeHeight };
 		}
+		glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
 	}
 	void wyswietl() {
 		XrCompositionLayerProjection layer{

@@ -14,6 +14,8 @@
 		ok.wyswietl();
 */
 
+bool running = true;
+
 struct WaterDrop {
 	Pos pos;
 	float velocity = 0.0f;
@@ -33,7 +35,7 @@ void erosion_thread_lambda(MapManager& m) {
 	const float EVAPORATION_RATE = 0.02f;
 	const float MIN_EROSION_DIFF = 0.01f; // Min height diff to erode
 
-	while (true) {
+	while (running) {
 		// 1. INITIALIZE THE DROP
 		Pos start_pos(
 			rnd.rndi() % 1000 - 500ll,
@@ -178,7 +180,7 @@ int main() {
 	o.scroolshift = &scroolshift;
 
 	std::thread tw([&]() {
-		while (1) {
+		while (running) {
 			std::chrono::milliseconds timespan(100);
 			std::this_thread::sleep_for(timespan);
 			printf("plpos x:%lf y:%lf z:%lf\n", o.playerpos.x, o.playerpos.y, o.playerpos.z);
@@ -294,7 +296,7 @@ int main() {
 	std::thread watrdrop(erosion_thread_lambda, std::ref(m));
 	std::thread watrdropold([&]() {
 		return;
-		while (1) {
+		while (running) {
 			int kk = 80;
 			float b = m.blockat(watp);
 			auto watpp = watp;
@@ -403,10 +405,18 @@ int main() {
 		o.setarg(0, glpoints, 3);
 		o.setarg(1, glcolors, 3);
 		o.setarg(2, glnorm, 3);
+		o.draw(torender, GL_POINTS);
 		o.drawXR(torender, GL_POINTS);
 		o.wyswietl();
 	}
-		exit(0);
+	running = false;
+	tw.join();
+	watrdrop.join();
+	watrdropold.join();
+	o.cleanup();
+	m.cleanup();
+	glfwTerminate();
+	exit(0);
 	return 0;
 }
 

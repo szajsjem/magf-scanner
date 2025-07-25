@@ -674,7 +674,7 @@ class MapgenNoise{
 	int reflectorCount = 10;
 	int sampleRate = 192000; // Hz
 	int timeCount = sampleRate * 3;
-	float speedOfLight = 299792.0f;// 299792458.0f; // m/s
+	float speedOfLight = 100.0f;// 299792458.0f; // m/s
 	float peaksmooth = 0.7f;
 public:
 	Pos randomPointOnSphere(float radius) {
@@ -711,7 +711,7 @@ public:
 			reflectorsPos[i].y = rand() - RAND_MAX / 2;
 			reflectorsPos[i].z = rand() - RAND_MAX / 2;
 			reflectorsPos[i].normalize(50);*/
-			reflectorsPos[i] = randomPointOnSphere(500);
+			reflectorsPos[i] = randomPointOnSphere(50);
 		}
 		for (int i = 0; i < receiverCount * senderCount; i++) {
 			signalsRxS[i].resize(timeCount);
@@ -1425,8 +1425,14 @@ class MapManager {
 		glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 	}
 public:
+	void cleanup() {
+		loadchunkq.cleanup();
+		genchunkq.cleanup();
+		optchunkq.cleanup();
+		savechunkq.cleanup();
+	}
 	MapManager(long long seed):noise(seed){
-		chunkss.reserve(320000);
+		chunkss.reserve(620000);
 		loadchunkq.start_exec([&](const Pos& p) {
 			Chunkholder* c = chunkss[p];
 			if (c != NULL)
